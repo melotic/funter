@@ -1,4 +1,4 @@
-<img align="left" width="64" height="64" src="https://i.imgur.com/7B6zGax.png" alt="logo">
+<img align="left" src="https://github.com/melotic/funter/blob/master/.github/logo.png?raw=true" alt="logo">
 
 # funter
 
