@@ -1,41 +1,36 @@
-use std::{
-    fs::{self},
-    io::Read,
-    sync::Arc,
-    thread,
-};
-
-use crossbeam_channel::{bounded, Receiver};
+use futures::future;
+use itertools::Itertools;
 use regex::bytes::Regex;
+use std::sync::Arc;
+use tokio::{fs::File, io::AsyncReadExt};
 use walkdir::{DirEntry, WalkDir};
 
-fn worker_thread(rx: Receiver<DirEntry>, regex: Arc<Regex>) {
-    for entry in rx {
-        let mut file = match fs::File::open(&entry.path()) {
-            Ok(file) => file,
-            Err(_) => continue,
-        };
+async fn worker_thread(entry: DirEntry, regex: Arc<Regex>) {
+    let mut file = match File::open(&entry.path()).await {
+        Ok(file) => file,
+        Err(_) => return,
+    };
 
-        // Read file in 32kb chunks
-        let mut buf = [0; 32 * 1024];
+    // Read file in 32kb chunks
+    let mut buf = [0; 32 * 1024];
 
-        match file.read(&mut buf) {
-            Ok(n) => {
-                if n == 0 {
-                    continue;
-                }
-
-                // Check if the file matches the regex
-                for m in regex.find_iter(&buf[..n]) {
-                    println!("{}", String::from_utf8_lossy(&buf[m.start()..m.end()]));
-                }
+    match file.read(&mut buf).await {
+        Ok(n) => {
+            if n == 0 {
+                return;
             }
-            Err(e) => println!("{}", e),
+
+            // Check if the file matches the regex
+            for m in regex.find_iter(&buf[..n]) {
+                println!("{}", String::from_utf8_lossy(&buf[m.start()..m.end()]));
+            }
         }
+        Err(e) => eprintln!("{}", e),
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // Parse the regex from the first argument
     let regex_str = match std::env::args().nth(1) {
         Some(regex_str) => regex_str,
@@ -54,32 +49,26 @@ fn main() {
         }
     };
 
-    // Create the channel
-    let (tx, rx) = bounded(1024);
-
-    // Spawn workers
-    for _ in 0..num_cpus::get() {
-        let rx = rx.clone();
-        let regex = regex.clone();
-        thread::spawn(move || worker_thread(rx, regex));
-    }
-
     let root_path = match std::env::args().nth(2) {
         Some(path) => path,
         None => "/".to_string(),
     };
 
-    for path in WalkDir::new(root_path)
+    for file_chunks in &WalkDir::new(root_path)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|x| x.file_type().is_file())
+        .filter(|x| x.file_type().is_file() && !x.path().starts_with("/proc"))
+        .chunks(32)
     {
-        // Ignore /proc
-        if path.path().starts_with("/proc") {
-            continue;
-        }
+        // map the chunks into a futures
+        let futures = file_chunks.map(|entry| {
+            let regex = Arc::clone(&regex);
+            tokio::spawn(async move {
+                worker_thread(entry, regex).await;
+            })
+        });
 
-        // Send the path to the channel
-        tx.send(path).unwrap();
+        // join all the futures
+        future::join_all(futures).await;
     }
 }
